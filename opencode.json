@@ -1,0 +1,56 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "openrouter/anthropic/claude-sonnet-4.5",
+  "small_model": "openrouter/anthropic/claude-haiku-4.5",
+  "default_agent": "build",
+  "autoupdate": "notify",
+  "snapshot": true,
+  "instructions": ["AGENTS.md", "CLAUDE.md"],
+  "permission": {
+    "edit": "allow",
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny"
+    },
+    "webfetch": "allow",
+    "external_directory": "deny",
+    "doom_loop": "deny",
+    "bash": {
+      "*": "allow",
+      "rm *": "deny",
+      "rmdir *": "deny",
+      "del *": "deny",
+      "Remove-Item *": "deny",
+      "format *": "deny",
+      "git commit *": "deny",
+      "git push *": "deny",
+      "git reset *": "deny",
+      "git restore *": "deny",
+      "git checkout *": "deny",
+      "git clean *": "deny",
+      "git branch -D *": "deny",
+      "npm publish *": "deny",
+      "pip uninstall *": "deny",
+      "opencode *": "deny",
+      "claude *": "deny",
+      "Invoke-AiTeam.ps1 *": "deny"
+    }
+  },
+  "agent": {
+    "build": {
+      "description": "Implementa tareas en el proyecto ICuatro: pyRevit, LAS_Terrain_App y utilidades Python.",
+      "prompt": "Trabajas en un proyecto BIM para Revit 2022 (pyRevit, IronPython 2.7) y utilidades CPython. Reglas: mantener compatibilidad con Revit 2022 y .NET Framework 4.8; no tocar nubes de puntos ni modelos binarios; cambios pequenos y localizados; no crear commits ni ramas (el supervisor revisa el diff); si una API de Autodesk es dudosa, verificarla en la documentacion antes de usarla; reportar bloqueos en vez de inventar soluciones. Al terminar, resume en pocas lineas que archivos cambiaste y como verificar."
+    },
+    "revisor": {
+      "description": "Revisa codigo sin modificarlo y reporta defectos por severidad.",
+      "mode": "subagent",
+      "prompt": "Revisa el diff o los archivos indicados. Reporta solo defectos reales con formato ruta:linea severidad problema fix. No elogies, no propongas refactors fuera de alcance.",
+      "tools": {
+        "write": false,
+        "edit": false,
+        "patch": false
+      }
+    }
+  }
+}
