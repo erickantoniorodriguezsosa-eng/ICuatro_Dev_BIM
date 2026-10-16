@@ -8,8 +8,9 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
-LIB = os.path.join(ROOT, 'Prueba.extension', 'lib')
-SCRIPT = os.path.join(ROOT, 'Prueba.extension', 'ICuatro.tab', 'NWD.panel',
+EXT = os.path.join(ROOT, 'Revit', 'pyRevit', 'ICuatro.extension')
+LIB = os.path.join(EXT, 'lib')
+SCRIPT = os.path.join(EXT, 'Ing.Cuatro.tab', 'NWD.panel',
                       'VerticalCoordinator.pushbutton', 'script.py')
 sys.path.insert(0, LIB)
 from nwdcoord import visualization as vis

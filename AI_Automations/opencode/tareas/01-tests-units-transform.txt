@@ -1,0 +1,33 @@
+Agrega pruebas unitarias para los modulos sin cobertura nwdcoord/units.py y
+nwdcoord/transform.py, ubicados en
+Revit/pyRevit/ICuatro.extension/lib/nwdcoord/.
+
+Alcance:
+- Crea tests/test_nwd_units.py y tests/test_nwd_transform.py.
+- No modifiques codigo de produccion. Si encuentras un defecto, reportalo en el
+  resumen final en vez de corregirlo.
+- No toques tests/test_nwd_modeless.py: ya esta roto por una ruta obsoleta
+  (apunta a Prueba.extension) y su arreglo no es parte de esta tarea.
+
+Estilo: sigue tests/test_nwd_slope.py. Encabezado "# -*- coding: utf-8 -*-",
+docstring corto en espanol, unittest (no pytest.fixture), imports de la forma
+"from nwdcoord import units, transform".
+
+Cobertura esperada: conversiones de unidades en ambos sentidos, redondeo y
+valores limite en units.py; composicion de transformaciones, ida y vuelta
+(round trip) y manejo de rotacion cero en transform.py.
+
+Verificacion, desde la raiz del proyecto:
+  $env:PYTHONPATH = "Revit\pyRevit\ICuatro.extension\lib"
+  Set-Location tests
+  ..\.venv\Scripts\python.exe -m pytest -q test_nwd_units.py test_nwd_transform.py
+
+Linea base ya medida: 61 pruebas pasan al ignorar test_nwd_modeless.py. Tus
+pruebas nuevas deben pasar y no romper ninguna existente.
+
+El codigo corre en IronPython 2.7 dentro de Revit 2022, asi que evita sintaxis
+exclusiva de Python 3 en los modulos de produccion; las pruebas corren en
+CPython desde .venv.
+
+Cierra con un resumen breve: archivos creados, cuantas pruebas agregaste y el
+resultado exacto de pytest.
