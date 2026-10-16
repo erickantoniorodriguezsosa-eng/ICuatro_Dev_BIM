@@ -1,0 +1,434 @@
+"""
+core_processing.py
+Lógica pesada (sin GUI): lectura LAS/LAZ, clasificación de terreno y triangulación.
+
+Convención: las coordenadas se guardan RECENTRADAS (restando self.origin) en float64.
+Motivo: coordenadas UTM (~1e5-1e7) pierden precisión en float32 (OpenGL / Open3D).
+Para exportar a coordenadas reales: points_local + processor.origin.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Optional
+
+import laspy
+import numpy as np
+import open3d as o3d
+import pyvista as pv
+
+# Códigos ASPRS estándar: 2 = Ground, 1 = Unclassified
+ASPRS_GROUND = 2
+ASPRS_UNCLASSIFIED = 1
+
+
+@dataclass
+class MeshResult:
+    vertices: np.ndarray   # (M, 3) float64, coords locales
+    triangles: np.ndarray  # (K, 3) int64
+
+
+# Categorización buildingSMART por tipo de elemento reconstruido.
+# part: jerarquía de puente "TIPO:Nombre" (IFC4X3: IfcBridgePart; IFC4/2X3: IfcElementAssembly).
+_DECK = ["SUPERSTRUCTURE:Superestructura", "DECK:Tablero"]
+_SAFETY = ["SUPERSTRUCTURE:Superestructura", "SURFACESTRUCTURE:Elementos de superficie y seguridad"]
+IFC_CATEGORY = {
+    "losa": {"part": _DECK},
+    "viga": {"part": _DECK, "predefined_type": {"IFC4X3": "GIRDER_SEGMENT", "default": "BEAM"}},
+    "baranda": {"part": _SAFETY, "predefined_type": "GUARDRAIL"},
+    "riel": {"part": _SAFETY, "predefined_type": "GUARDRAIL"},
+    "poste": {"part": _SAFETY, "predefined_type": "POST"},
+    "estribo": {"part": ["SUBSTRUCTURE:Subestructura"]},
+}
+ASSUMPTIONS = {"estribo": "Espesor de espaldar 0.30 m supuesto; base plana; sin muros de retorno",
+               "poste": "Prisma rectangular; el perfil real es una I", "riel": "Riel macizo; el tubo real es hueco"}
+
+
+class PointCloudProcessor:
+    def __init__(self) -> None:
+        self.points: Optional[np.ndarray] = None          # (N, 3) float64 locales
+        self.origin: np.ndarray = np.zeros(3)             # desplazamiento a coords reales
+        self.classification: Optional[np.ndarray] = None  # (N,) uint8 (códigos ASPRS)
+        self.mesh: Optional[MeshResult] = None
+        self.crs = None                                   # CRS del LAS si existe
+        self.rgb = None                                   # (N,3) uint8 si el LAS trae color
+        self.structure = None                             # reconstruct.StructureResult
+        self.section = None                               # reconstruct.SectionResult
+        self.elements = []                                # reconstruct.Element
+        self.solids = []                                  # reconstruct.Solid
+
+    # ------------------------------------------------------------------ carga
+    def load_las(self, path: str) -> dict:
+        """Lee .las/.laz. Para .laz hace falta laspy[lazrs] (ya en requirements)."""
+        las = laspy.read(path)
+        xyz = np.column_stack((np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)))
+        fin = np.isfinite(xyz).all(axis=1)
+        xyz = xyz[fin]
+        self.rgb = None      # color original del LAS (uint8) si lo trae; la vista de la nube original lo usa
+        if {"red", "green", "blue"} <= set(las.point_format.dimension_names):
+            rgb = np.column_stack((np.asarray(las.red), np.asarray(las.green), np.asarray(las.blue)))
+            top = int(rgb.max()) if rgb.size else 0
+            if top > 0:
+                self.rgb = (rgb[fin] >> (8 if top > 255 else 0)).astype(np.uint8)
+            del rgb
+        if len(xyz) == 0:
+            raise ValueError("El archivo no contiene puntos válidos.")
+
+        self.origin = xyz.min(axis=0)
+        self.points = xyz - self.origin
+        self.classification = np.full(len(xyz), ASPRS_UNCLASSIFIED, dtype=np.uint8)
+        self.mesh = None
+        try:
+            self.crs = las.header.parse_crs()
+        except Exception:
+            self.crs = None
+
+        # EXTENSIÓN: si el LAS ya trae clasificación (las.classification), úsala aquí
+        # como punto de partida o para validar tu clasificador contra una referencia.
+        # Ojo: si filtras puntos no finitos arriba, filtra también ese atributo.
+        return {
+            "n_points": len(xyz),
+            "origin": self.origin.copy(),
+            "extent": self.points.max(axis=0),
+            "z_range": (float(xyz[:, 2].min()), float(xyz[:, 2].max())),
+        }
+
+    # ----------------------------------------------------------- clasificación
+    def classify_ground(self, method: str = "grid", **kw) -> dict:
+        """
+        Clasificación BÁSICA de terreno. Devuelve estadísticas.
+
+        >>> PUNTO DE INTEGRACIÓN <<<
+        Para algoritmos avanzados añade un método `_ground_csf` (Cloth Simulation
+        Filter: pip install cloth-simulation-filter -> import CSF) o PMF/SMRF (PDAL),
+        y regístralo en el `if` de abajo. Contrato: debe devolver una máscara
+        booleana (N,) con True = terreno. El resto del pipeline no cambia.
+        """
+        self._require_points()
+        if method == "grid":
+            mask = self._ground_grid_min(**kw)
+        elif method == "ransac":
+            mask = self._ground_ransac(**kw)
+        # elif method == "csf":
+        #     mask = self._ground_csf(**kw)
+        else:
+            raise ValueError(f"Método desconocido: {method}")
+
+        self.classification[:] = ASPRS_UNCLASSIFIED
+        self.classification[mask] = ASPRS_GROUND
+        self.mesh = None
+        return {"ground": int(mask.sum()), "non_ground": int((~mask).sum())}
+
+    def classify_auto(self, model_path: str | None = None, voxel: float | None = None) -> dict:
+        """
+        Clasificación por forma (terreno / estructura / vegetación) con el modelo de
+        autoclass.py. Escribe códigos ASPRS: 2 suelo, 6 estructura, 5 vegetación.
+        >>> Para otro criterio o más clases: ver autoclass.GROUPS y train_autoclass.py.
+        """
+        import os
+        import autoclass
+        self._require_points()
+        path = model_path or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "models", "autoclass.joblib")
+        if not os.path.isfile(path):
+            raise RuntimeError("Falta el modelo (models/autoclass.joblib). Ejecuta train_autoclass.py.")
+        bundle = autoclass.load_model(path)
+        self.classification = autoclass.predict_points(self.points, bundle, voxel)
+        self.mesh = None
+        codes, counts = np.unique(self.classification, return_counts=True)
+        n = dict(zip(codes.tolist(), counts.tolist()))
+        return {"ground": n.get(2, 0), "structure": n.get(6, 0), "vegetation": n.get(5, 0),
+                "non_ground": len(self.points) - n.get(2, 0), "voxel": voxel or bundle["voxel"],
+                "model_val_acc": bundle.get("val_acc")}
+
+    def analyze_structure(self, **kw) -> dict:
+        """Agrupa la estructura (clase 6) y estima el eje del puente. Ver reconstruct.py."""
+        import reconstruct
+        self._require_points()
+        if not (self.classification == 6).any():
+            raise RuntimeError("No hay estructura clasificada. Usa la clasificación automática primero.")
+        self.structure = reconstruct.structure_clusters(self.points, self.classification, **kw)
+        r = self.structure
+        return {"clusters": r.clusters,
+                "axis": None if r.axis_dir is None else {
+                    "angle_deg": r.axis_angle_deg, "pca_angle_deg": r.pca_angle_deg, "length": r.length, "width": r.width,
+                    "center_real": (r.axis_center + self.origin).tolist()}}
+
+    def extract_section(self, **kw) -> dict:
+        """Sección transversal del tablero y líneas 3D (ver reconstruct.extract_section)."""
+        import reconstruct
+        if self.structure is None or not self.structure.clusters:
+            raise RuntimeError("Agrupa la estructura y estima el eje primero.")
+        self.section = reconstruct.extract_section(self.points, self.structure, **kw)
+        sec = self.section
+        png = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".section.png")
+        reconstruct.save_section_png(sec, png)
+        return {"contours": len(sec.polygons), "vertices": [len(p) for p in sec.polygons],
+                "slabs": sec.n_slabs, "s_mid": sec.s_mid, "ends": sec.ends,
+                "grade_coef": sec.grade.tolist(), "validation": sec.validation,
+                "lines3d": len(sec.lines3d), "png": png}
+
+    def build_elements(self, **kw) -> dict:
+        """Separa la sección en losa / vigas / barandas y genera sólidos cerrados."""
+        import reconstruct
+        if self.section is None:
+            raise RuntimeError("Extrae la sección primero.")
+        self.elements = reconstruct.separate_elements(self.section, **kw)
+        self.solids = reconstruct.build_solids(self.section, self.elements)
+        return {"elements": [{"name": s.name, "ifc_class": s.ifc_class, "volume_m3": round(s.volume, 2),
+                              "watertight": s.watertight, "triangles": int(len(s.triangles)),
+                              "area_m2": round(e.area, 3)}
+                             for s, e in zip(self.solids, self.elements)],
+                "total_volume_m3": round(sum(s.volume for s in self.solids), 1)}
+
+    def build_abutments(self, **kw) -> dict:
+        """Estribos en ambos extremos del tablero (reconstruct.extract_abutments); se agregan a solids."""
+        import reconstruct
+        if self.section is None or self.structure is None:
+            raise RuntimeError("Extrae la sección primero.")
+        ab = reconstruct.extract_abutments(self.points, self.section, self.structure.width, **kw)
+        if not ab:
+            raise RuntimeError("No se detectó la cara frontal de los estribos.")
+        self.solids = [s for s in self.solids if s.kind != "estribo"] + ab
+        return {"abutments": [{"name": s.name, "volume_m3": round(s.volume, 2), "watertight": s.watertight,
+                               **{k: (round(v, 3) if isinstance(v, float) else v)
+                                  for k, v in s.metrics.items()}} for s in ab]}
+
+    def build_railings(self, **kw) -> dict:
+        """Baranda por componentes: rieles continuos y postes. Reemplaza los sólidos 'baranda' toscos."""
+        import reconstruct
+        if not self.elements:
+            raise RuntimeError("Separa los elementos primero.")
+        rl = reconstruct.extract_railings(self.points, self.section, self.structure, self.elements, **kw)
+        if not rl:
+            raise RuntimeError("No se detectaron rieles.")
+        self.solids = [s for s in self.solids if s.kind not in ("baranda", "riel", "poste")] + rl
+        by = {}
+        for s in rl:
+            by.setdefault((s.metrics["side"], s.kind), []).append(s)
+        return {"railings": {f"{side} {kind}": len(v) for (side, kind), v in by.items()},
+                "post_spacing_median_m": {side: round(float(np.median(np.diff(sorted(x.metrics["s"] for x in v)))), 3)
+                                          for (side, kind), v in by.items() if kind == "poste"},
+                "rails": [{"name": s.name, "z_rel": [round(z, 3) for z in s.metrics["z_rel"]],
+                           "t": [round(z, 3) for z in s.metrics["t"]]} for s in rl if s.kind == "riel"],
+                "watertight": f"{sum(s.watertight for s in rl)}/{len(rl)}"}
+
+    def export_ifc(self, path: str, version: str = "ALL", epsg: int | None = None,
+                   include_terrain: bool = True, config: dict | None = None) -> dict:
+        """
+        Exporta los sólidos (y la malla de terreno) a IFC. `config` (de la ventana de exportación):
+        versions, categories {tipo: {include, ifc_class, predefined_type}}, only_names, hierarchy,
+        psets, qto, custom, georef, validate. predefined_type None = el predeterminado de la categoría,
+        "" = sin tipo, otro texto = ese tipo (se omite en las versiones donde no es válido).
+        """
+        import ifc_export
+        if not getattr(self, "solids", None):
+            raise RuntimeError("Genera los sólidos primero.")
+        cfg = {"versions": None, "categories": {}, "only_names": None, "hierarchy": True, "psets": True,
+               "qto": True, "custom": True, "georef": True, "validate": False}
+        cfg.update(config or {})
+        if epsg is None and self.crs is not None:
+            try:
+                epsg = self.crs.to_epsg()
+            except Exception:
+                epsg = None
+        only = cfg["only_names"]
+
+        def wanted(kind, name):
+            return cfg["categories"].get(kind, {}).get("include", True) is not False and (only is None or name in only)
+
+        items = []
+        for s in self.solids:
+            if not wanted(s.kind, s.name):
+                continue
+            cat = cfg["categories"].get(s.kind, {})
+            meta = dict(IFC_CATEGORY.get(s.kind, {}))
+            if s.kind == "estribo":     # cada estribo es una parte ABUTMENT propia
+                meta["part"] = ["SUBSTRUCTURE:Subestructura", f"ABUTMENT:{s.name}"]
+            it = {"name": s.name, "ifc_class": cat.get("ifc_class") or s.ifc_class,
+                  "vertices": s.vertices + self.origin, "triangles": s.triangles, "volume": s.volume,
+                  "closed": s.watertight, **meta, "assumptions": ASSUMPTIONS.get(s.kind, "")}
+            if cat.get("predefined_type") is not None:
+                it["predefined_type"] = cat["predefined_type"] or None
+            items.append(it)
+        if include_terrain and self.mesh is not None and wanted("terreno", "Terreno"):
+            cat = cfg["categories"].get("terreno", {})
+            pt = cat.get("predefined_type")
+            items.append({"name": "Terreno", "ifc_class": cat.get("ifc_class") or "IfcGeographicElement",
+                          "vertices": self.mesh.vertices + self.origin, "triangles": self.mesh.triangles,
+                          "predefined_type": "TERRAIN" if pt is None else (pt or None)})
+        if not items:
+            raise RuntimeError("Ningún elemento seleccionado para exportar.")
+
+        base, ext = os.path.splitext(path)
+        versions = cfg["versions"] or (list(ifc_export.SCHEMAS) if version.upper() == "ALL" else [version])
+        out, validation = {}, {}
+        for v in versions:
+            target = f"{base}_{v.upper()}.ifc" if len(versions) > 1 else path
+            ifc_export.export_elements_ifc(items, target, v, epsg, options=cfg)
+            out[v.upper()] = target
+            if cfg["validate"]:
+                import ifcopenshell
+                import ifcopenshell.validate as val
+                lg = val.json_logger()
+                val.validate(ifcopenshell.open(target), lg)
+                validation[v.upper()] = len(lg.statements)
+        res = {"files": out, "epsg": epsg, "elements": len(items)}
+        if validation:
+            res["validation_issues"] = validation
+        return res
+
+    def _ground_grid_min(self, cell_size: float = 2.0, height_tol: float = 0.5) -> np.ndarray:
+        """
+        Filtro de altura por celdas: terreno = puntos a <= height_tol sobre el mínimo
+        de su celda. Funciona en terreno ondulado (a diferencia de un plano único).
+        Limitaciones: pendiente fuerte dentro de una celda -> reducir cell_size;
+        un outlier bajo en la celda sesga el mínimo (filtrar ruido antes).
+        """
+        p = self.points
+        ij = np.floor((p[:, :2] - p[:, :2].min(axis=0)) / cell_size).astype(np.int64)
+        key = ij[:, 0] * (ij[:, 1].max() + 1) + ij[:, 1]
+        _, inv = np.unique(key, return_inverse=True)
+        inv = inv.ravel()
+        zmin = np.full(inv.max() + 1, np.inf)
+        np.minimum.at(zmin, inv, p[:, 2])
+        return (p[:, 2] - zmin[inv]) <= height_tol
+
+    def _ground_ransac(self, distance: float = 0.3, n_iter: int = 2000) -> np.ndarray:
+        """Un único plano global (RANSAC Open3D). Solo válido para terreno casi plano."""
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(self.points))
+        _, inliers = pcd.segment_plane(distance_threshold=distance, ransac_n=3,
+                                       num_iterations=n_iter)
+        mask = np.zeros(len(self.points), dtype=bool)
+        mask[inliers] = True
+        return mask
+
+    # ----------------------------------------------------------- superficie
+    def generate_surface(self, method: str = "delaunay", voxel_size: float = 0.0,
+                         max_edge: float = 0.0, poisson_depth: int = 9) -> dict:
+        """
+        Malla a partir SOLO de puntos de terreno.
+        - 'delaunay': TIN 2.5D (triangulación en XY, Z como atributo). Método
+          topográfico estándar: respeta los puntos exactos, sin suavizado.
+        - 'poisson': superficie implícita suavizada. No interpola exacto y es poco
+          adecuada para terreno abierto (superficie 2.5D, no cerrada).
+        voxel_size > 0 diezma el terreno antes de triangular (0 = sin diezmar).
+        max_edge > 0 elimina triángulos con arista mayor (huecos, bordes falsos).
+        """
+        self._require_points()
+        ground = self.points[self.classification == ASPRS_GROUND]
+        if len(ground) < 3:
+            raise ValueError("Sin puntos de terreno. Clasifica primero.")
+
+        if voxel_size > 0:
+            pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(ground))
+            ground = np.asarray(pcd.voxel_down_sample(voxel_size).points)
+
+        if method == "delaunay":
+            self.mesh = self._tin_delaunay(ground, max_edge)
+        elif method == "poisson":
+            self.mesh = self._poisson(ground, poisson_depth)
+        else:
+            raise ValueError(f"Método desconocido: {method}")
+        return {"vertices": len(self.mesh.vertices), "triangles": len(self.mesh.triangles)}
+
+    def _tin_delaunay(self, pts: np.ndarray, max_edge: float) -> MeshResult:
+        # Delaunay 2D sobre XY (z viaja como coordenada del vértice)
+        surf = pv.PolyData(pts).delaunay_2d()
+        tris = surf.faces.reshape(-1, 4)[:, 1:].astype(np.int64)
+        v = np.asarray(surf.points, dtype=np.float64)
+        if max_edge > 0:
+            a, b, c = v[tris[:, 0], :2], v[tris[:, 1], :2], v[tris[:, 2], :2]
+            longest = np.maximum.reduce([np.linalg.norm(a - b, axis=1),
+                                         np.linalg.norm(b - c, axis=1),
+                                         np.linalg.norm(c - a, axis=1)])
+            tris = tris[longest <= max_edge]
+        # EXTENSIÓN: breaklines (quiebres, ejes de vía) -> Delaunay restringida
+        # (librería `triangle` o CGAL); curvas de nivel -> contour sobre la malla;
+        # volúmenes/cortes-rellenos -> diferencia entre dos TIN.
+        return MeshResult(v, tris)
+
+    def _poisson(self, pts: np.ndarray, depth: int) -> MeshResult:
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
+        pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=3.0, max_nn=30))
+        pcd.orient_normals_to_align_with_direction(np.array([0.0, 0.0, 1.0]))
+        mesh, dens = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth)
+        # Quita 5 % de menor densidad (lengüetas que Poisson inventa fuera de datos)
+        mesh.remove_vertices_by_mask(np.asarray(dens) < np.quantile(dens, 0.05))
+        mesh = mesh.crop(pcd.get_axis_aligned_bounding_box())
+        return MeshResult(np.asarray(mesh.vertices), np.asarray(mesh.triangles).astype(np.int64))
+
+    # ------------------------------------------------------------- suavizado
+    def smooth_mesh(self, method: str = "taubin", iterations: int = 10,
+                    lambda_filter: float = 0.5, mu: float = -0.53,
+                    preserve_xy: bool = True) -> dict:
+        """
+        Suaviza la malla con filtros de Open3D (simple / laplacian / taubin).
+        preserve_xy=True mantiene X,Y y solo suaviza Z (evita encoger bordes).
+        Aleja la malla de los puntos medidos: se devuelve cuánto cambió Z.
+        """
+        if self.mesh is None or len(self.mesh.triangles) == 0:
+            raise RuntimeError("Genera la superficie primero.")
+        before = self.mesh.vertices
+        work = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(before - before.mean(axis=0)),
+                                         o3d.utility.Vector3iVector(self.mesh.triangles))
+        if method == "simple":
+            out = work.filter_smooth_simple(number_of_iterations=iterations)
+        elif method == "laplacian":
+            out = work.filter_smooth_laplacian(number_of_iterations=iterations,
+                                               lambda_filter=lambda_filter)
+        elif method == "taubin":
+            out = work.filter_smooth_taubin(number_of_iterations=iterations,
+                                            lambda_filter=lambda_filter, mu=mu)
+        else:
+            raise ValueError(f"Método desconocido: {method}")
+        # Vértices sin triángulos (quedan al filtrar con arista máx.) dan NaN: no se tocan.
+        used = np.zeros(len(before), dtype=bool)
+        used[np.asarray(self.mesh.triangles).ravel()] = True
+        after = before.copy()
+        after[used] = (np.asarray(out.vertices) + before.mean(axis=0))[used]
+        if not np.isfinite(after[used]).all():
+            raise RuntimeError("El suavizado produjo valores no finitos; malla sin cambios.")
+        if preserve_xy:
+            after[:, :2] = before[:, :2]
+        dz = after[:, 2] - before[:, 2]
+        self.mesh = MeshResult(after, self.mesh.triangles)
+        return {"rms_dz": float(np.sqrt((dz ** 2).mean())), "max_dz": float(np.abs(dz).max())}
+
+    # -------------------------------------------------------------- análisis
+    def analyze(self) -> dict:
+        """Resumen cuantitativo de la nube (densidad, espaciado, Z, clases, ruido)."""
+        self._require_points()
+        p = self.points
+        ext = p.max(axis=0)
+        area = max(ext[0] * ext[1], 1e-9)
+        dens = len(p) / area
+        z = p[:, 2] + self.origin[2]
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(
+            p[self.display_sample(200_000)]))
+        nn = np.asarray(pcd.compute_nearest_neighbor_distance())
+        scale = len(p) / max(len(nn), 1)
+        codes, counts = np.unique(self.classification, return_counts=True)
+        return {
+            "n_points": int(len(p)),
+            "extent_xyz": [float(v) for v in ext],
+            "area_bbox": float(area),
+            "density_pts_m2": float(dens),
+            "spacing_median_m": float(np.median(nn) / np.sqrt(scale)),  # corrige el efecto de la muestra
+            "z_percentiles": {str(q): float(np.percentile(z, q)) for q in (0, 1, 5, 50, 95, 99, 100)},
+            "classes": {int(c): int(n) for c, n in zip(codes, counts)},
+            "mesh": None if self.mesh is None else {
+                "vertices": int(len(self.mesh.vertices)), "triangles": int(len(self.mesh.triangles))},
+        }
+
+    # ----------------------------------------------------------- utilidades
+    def display_sample(self, max_points: int = 2_000_000) -> np.ndarray:
+        """Índices para render (diezmado aleatorio si la nube es enorme)."""
+        n = len(self.points)
+        if n <= max_points:
+            return np.arange(n)
+        return np.random.default_rng(0).choice(n, max_points, replace=False)
+
+    def _require_points(self) -> None:
+        if self.points is None:
+            raise RuntimeError("Carga un archivo .LAS primero.")

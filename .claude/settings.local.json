@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"from PIL import Image; im=Image.open\\('Prueba.extension/ICuatro.tab/MEP.panel/CrearTuberiaDucto.pushbutton/icon.png'\\); print\\(im.size, im.mode\\)\")",
+      "PowerShell(& \"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\2022\\\\BuildTools\\\\MSBuild\\\\Current\\\\Bin\\\\amd64\\\\MSBuild.exe\" \"C:\\\\OD\\\\OneDrive - Ingenier�a Cuatro S.A\\\\Documentos\\\\_00.PRUEBAS.DYNAMO\\\\_Pruebas\\\\TuberiaDuctoAddin\\\\TuberiaDuctoAddin.csproj\" /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal)",
+      "PowerShell(& \"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\2022\\\\BuildTools\\\\MSBuild\\\\Current\\\\Bin\\\\amd64\\\\MSBuild.exe\" \"C:\\\\OD\\\\OneDrive - Ingenier�a Cuatro S.A\\\\Documentos\\\\_00.PRUEBAS.DYNAMO\\\\_Pruebas\\\\TuberiaDuctoAddin\\\\TuberiaDuctoAddin.csproj\" /p:Configuration=Debug /p:Platform=x64 /nologo /v:minimal)"
+    ]
+  }
+}

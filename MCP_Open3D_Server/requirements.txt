@@ -1,0 +1,7 @@
+# Python 3.10 - 3.11 (Open3D 0.18 no soporta 3.12+)
+mcp>=1.2,<2
+open3d==0.18.0
+laspy[lazrs]==2.5.4
+numpy==1.26.4
+scipy>=1.11
+ifcopenshell>=0.8.0

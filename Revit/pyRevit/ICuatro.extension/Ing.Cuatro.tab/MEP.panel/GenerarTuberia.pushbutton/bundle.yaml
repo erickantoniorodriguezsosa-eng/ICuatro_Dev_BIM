@@ -1,0 +1,6 @@
+title: "Generar\nTuberia NWD"
+tooltip: >-
+  Ventana persistente para seleccionar y verificar elementos modelados por
+  seleccion de Revit o por pantalla. Crea una tuberia entre dos puntos de
+  insercion con tipo de sistema y tipo de tuberia asignados manualmente.
+author: Ingenieria Cuatro S.A.

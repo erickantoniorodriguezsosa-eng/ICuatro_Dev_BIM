@@ -1,0 +1,270 @@
+"""
+ifc_export.py
+Exporta una malla de terreno (TIN) a IFC en IFC2X3, IFC4 o IFC4X3.
+
+- IFC4 / IFC4X3: IfcGeographicElement (TERRAIN) con IfcTriangulatedFaceSet.
+- IFC2X3: IfcBuildingElementProxy con IfcFaceBasedSurfaceModel (esa versión no tiene
+  IfcTriangulatedFaceSet ni IfcGeographicElement).
+- Geometría en coordenadas locales (restando el mínimo). El desplazamiento a coordenadas
+  reales va en IfcMapConversion (IFC4+, si se da EPSG) o en el placement del elemento.
+"""
+import numpy as np
+import ifcopenshell
+import ifcopenshell.api
+import ifcopenshell.api.owner.settings as owner_settings
+
+_ORIG_OWNER = (owner_settings.get_user, owner_settings.get_application)
+
+SCHEMAS = {"IFC2X3": "IFC2X3", "IFC4": "IFC4", "IFC4X3": "IFC4X3_ADD2"}
+
+
+def export_terrain_ifc(vertices: np.ndarray, triangles: np.ndarray, path: str,
+                       version: str = "IFC4", epsg: int | None = None,
+                       name: str = "Terreno") -> str:
+    version = version.upper().replace(".", "")
+    if version not in SCHEMAS:
+        raise ValueError(f"Versión '{version}' no válida. Usa: {', '.join(SCHEMAS)}.")
+    if len(triangles) == 0:
+        raise ValueError("La malla no tiene triángulos.")
+
+    owner_settings.get_user, owner_settings.get_application = _ORIG_OWNER   # el parche de IFC2X3 no debe filtrarse a otras versiones
+    f = ifcopenshell.file(schema=SCHEMAS[version])
+    api = ifcopenshell.api
+    if version == "IFC2X3":  # IFC2X3 exige OwnerHistory con usuario y aplicación
+        person = f.createIfcPerson(None, "Open3D", "MCP")
+        org = f.createIfcOrganization(None, "Open3D MCP")
+        user = f.createIfcPersonAndOrganization(person, org)
+        app = f.createIfcApplication(org, "1.0", "Open3D MCP Server", "Open3DMCP")
+        owner_settings.get_user = lambda _f: user
+        owner_settings.get_application = lambda _f: app
+    project = api.run("root.create_entity", f, ifc_class="IfcProject", name=name)
+    api.run("unit.assign_unit", f)  # metros, radianes, etc. por defecto
+    model = api.run("context.add_context", f, context_type="Model")
+    body = api.run("context.add_context", f, context_type="Model", context_identifier="Body",
+                   target_view="MODEL_VIEW", parent=model)
+    site = api.run("root.create_entity", f, ifc_class="IfcSite", name="Sitio")
+    api.run("aggregate.assign_object", f, products=[site], relating_object=project)
+
+    if version == "IFC2X3":
+        terrain = api.run("root.create_entity", f, ifc_class="IfcBuildingElementProxy", name=name)
+    else:
+        terrain = api.run("root.create_entity", f, ifc_class="IfcGeographicElement", name=name,
+                          predefined_type="TERRAIN")
+    api.run("spatial.assign_container", f, products=[terrain], relating_structure=site)
+
+    offset = vertices.min(axis=0)
+    local = vertices - offset
+    georef = False
+    if epsg and version != "IFC2X3":
+        api.run("georeference.add_georeferencing", f)
+        api.run("georeference.edit_georeferencing", f,
+                projected_crs={"Name": f"EPSG:{int(epsg)}"},
+                coordinate_operation={"Eastings": float(offset[0]), "Northings": float(offset[1]),
+                                      "OrthogonalHeight": float(offset[2])})
+        georef = True
+    if not georef:
+        m = np.eye(4)
+        m[:3, 3] = offset
+        api.run("geometry.edit_object_placement", f, product=terrain, matrix=m)
+
+    if version == "IFC2X3":
+        pts = [f.createIfcCartesianPoint(v) for v in local.tolist()]
+        faces = [f.createIfcFace([f.createIfcFaceOuterBound(
+                    f.createIfcPolyLoop([pts[a], pts[b], pts[c]]), True)])
+                 for a, b, c in triangles.tolist()]
+        item = f.createIfcFaceBasedSurfaceModel([f.createIfcConnectedFaceSet(faces)])
+        rep_type = "SurfaceModel"
+    else:
+        coords = f.createIfcCartesianPointList3D(local.tolist())
+        item = f.createIfcTriangulatedFaceSet(coords, None, None, (triangles + 1).tolist(), None)
+        rep_type = "Tessellation"
+    rep = f.createIfcShapeRepresentation(body, "Body", rep_type, [item])
+    api.run("geometry.assign_representation", f, product=terrain, representation=rep)
+
+    pset = api.run("pset.add_pset", f, product=terrain, name="Pset_TerrenoOpen3D")
+    api.run("pset.edit_pset", f, pset=pset, properties={
+        "Vertices": int(len(vertices)), "Triangulos": int(len(triangles)),
+        "OrigenX": float(offset[0]), "OrigenY": float(offset[1]), "OrigenZ": float(offset[2]),
+        "EPSG": int(epsg) if epsg else 0})
+
+    f.write(path)
+    return path
+
+# Propiedades estándar buildingSMART por clase: (Pset común, Qto de cantidades base)
+_PSET_COMMON = {"IfcSlab": "Pset_SlabCommon", "IfcBeam": "Pset_BeamCommon", "IfcRailing": "Pset_RailingCommon",
+                "IfcMember": "Pset_MemberCommon", "IfcWall": "Pset_WallCommon"}
+_QTO = {"IfcSlab": "Qto_SlabBaseQuantities", "IfcBeam": "Qto_BeamBaseQuantities",
+        "IfcMember": "Qto_MemberBaseQuantities", "IfcWall": "Qto_WallBaseQuantities"}
+
+
+def _pt(item: dict, version: str):
+    """Tipo predefinido del ítem para la versión (acepta str o dict por versión con clave 'default')."""
+    pt = item.get("predefined_type")
+    if isinstance(pt, dict):
+        return pt.get(version, pt.get("default"))
+    return pt
+
+
+def export_elements_ifc(items: list, path: str, version: str = "IFC4", epsg: int | None = None,
+                        name: str = "Modelo desde nube", options: dict | None = None) -> str:
+    """
+    Exporta elementos a IFC siguiendo la organización de buildingSMART.
+    Cada ítem: name, ifc_class, vertices (coords reales), triangles, y opcionales volume, closed,
+    predefined_type (str o dict por versión), part (lista de "TIPO:Nombre" de la jerarquía de puente).
+
+    Jerarquía espacial:
+    - IFC4X3: IfcProject > IfcSite > IfcBridge (GIRDER) > IfcBridgePart (SUPERSTRUCTURE > DECK,
+      SUBSTRUCTURE > ABUTMENT). Los elementos se contienen en la parte que corresponde.
+    - IFC4 / IFC2X3 (sin IfcBridge): IfcSite > IfcBuilding > IfcElementAssembly anidados con los mismos
+      nombres; los elementos se agregan al ensamblaje.
+    - Elementos sin `part` (terreno) se contienen en IfcSite.
+    Propiedades: Pset común y Qto base de la clase (IFC4+) con IsExternal/LoadBearing y GrossVolume.
+    Geometría local respecto al mínimo común; el desplazamiento va en IfcMapConversion (IFC4+ con EPSG)
+    o en el placement de cada elemento.
+    options (todas True por defecto): hierarchy (jerarquía de puente), psets (Pset común), qto (cantidades
+    base), custom (Pset_Open3D con supuestos), georef (IfcMapConversion si hay EPSG).
+    Si una clase no existe en el esquema elegido se usa IfcBuildingElementProxy.
+    """
+    version = version.upper().replace(".", "")
+    if version not in SCHEMAS:
+        raise ValueError(f"Versión '{version}' no válida. Usa: {', '.join(SCHEMAS)}.")
+    if not items:
+        raise ValueError("No hay elementos para exportar.")
+    opt = {"hierarchy": True, "psets": True, "qto": True, "custom": True, "georef": True}
+    opt.update({k: bool(v) for k, v in (options or {}).items() if k in opt})
+    schema = ifcopenshell.ifcopenshell_wrapper.schema_by_name(SCHEMAS[version])
+
+    owner_settings.get_user, owner_settings.get_application = _ORIG_OWNER   # el parche de IFC2X3 no debe filtrarse a otras versiones
+    f = ifcopenshell.file(schema=SCHEMAS[version])
+    api = ifcopenshell.api
+    if version == "IFC2X3":
+        person = f.createIfcPerson(None, "Open3D", "MCP")
+        org = f.createIfcOrganization(None, "Open3D MCP")
+        user = f.createIfcPersonAndOrganization(person, org)
+        app = f.createIfcApplication(org, "1.0", "Open3D MCP Server", "Open3DMCP")
+        owner_settings.get_user = lambda _f: user
+        owner_settings.get_application = lambda _f: app
+    project = api.run("root.create_entity", f, ifc_class="IfcProject", name=name)
+    api.run("unit.assign_unit", f)
+    model = api.run("context.add_context", f, context_type="Model")
+    body = api.run("context.add_context", f, context_type="Model", context_identifier="Body",
+                   target_view="MODEL_VIEW", parent=model)
+    site = api.run("root.create_entity", f, ifc_class="IfcSite", name="Sitio")
+    api.run("aggregate.assign_object", f, products=[site], relating_object=project)
+
+    def create(cls, nm, pt=None):
+        el = None
+        if pt:
+            try:
+                el = api.run("root.create_entity", f, ifc_class=cls, name=nm, predefined_type=pt)
+            except Exception:       # tipo predefinido no válido en esta versión: se omite
+                pass
+        if el is None:
+            el = api.run("root.create_entity", f, ifc_class=cls, name=nm)
+        try:                        # PredefinedType obligatorio (p. ej. IfcFooting en IFC2X3): NOTDEFINED
+            for a in schema.declaration_by_name(cls).all_attributes():
+                if a.name() == "PredefinedType" and not a.optional() and getattr(el, "PredefinedType", None) is None:
+                    el.PredefinedType = "NOTDEFINED"
+        except Exception:
+            pass
+        return el
+
+    has_parts = opt["hierarchy"] and any(i.get("part") for i in items)
+    root = site
+    if has_parts:
+        if version == "IFC4X3":
+            root = create("IfcBridge", "Puente", "GIRDER")
+        else:
+            root = create("IfcBuilding", "Puente")
+        api.run("aggregate.assign_object", f, products=[root], relating_object=site)
+
+    containers = {}
+
+    def container_for(parts):
+        """Devuelve el contenedor (parte de puente o ensamblaje) para la ruta, creándolo si falta."""
+        if not parts:
+            return site, False
+        parent, key = root, ()
+        for p in parts:
+            key += (p,)
+            if key not in containers:
+                kind, _, nm = p.partition(":")
+                if version == "IFC4X3":
+                    node = create("IfcBridgePart", nm, kind)
+                    # UsageType es obligatorio en IfcBridgePart (IFC4X3_ADD2)
+                    node.UsageType = "VERTICAL" if kind in ("SUBSTRUCTURE", "ABUTMENT", "PIER", "FOUNDATION") else "LONGITUDINAL"
+                    api.run("aggregate.assign_object", f, products=[node], relating_object=parent)
+                else:
+                    node = create("IfcElementAssembly", nm, "NOTDEFINED")   # PredefinedType obligatorio en IFC2X3
+                    if parent is root:
+                        api.run("spatial.assign_container", f, products=[node], relating_structure=root)
+                    else:
+                        api.run("aggregate.assign_object", f, products=[node], relating_object=parent)
+                containers[key] = node
+            parent = containers[key]
+        return parent, version != "IFC4X3"          # True: se agrega como parte de un ensamblaje
+
+    offset = np.min([np.asarray(i["vertices"]).min(axis=0) for i in items], axis=0)
+    georef = False
+    if epsg and version != "IFC2X3" and opt["georef"]:
+        api.run("georeference.add_georeferencing", f)
+        api.run("georeference.edit_georeferencing", f, projected_crs={"Name": f"EPSG:{int(epsg)}"},
+                coordinate_operation={"Eastings": float(offset[0]), "Northings": float(offset[1]),
+                                      "OrthogonalHeight": float(offset[2])})
+        georef = True
+
+    for it in items:
+        cls = it["ifc_class"]
+        pt = _pt(it, version)
+        try:
+            schema.declaration_by_name(cls)
+        except Exception:                      # la clase no existe en este esquema
+            cls, pt = "IfcBuildingElementProxy", None
+        el = create(cls, it["name"], pt)
+        node, as_part = container_for(it.get("part") if opt["hierarchy"] else None)
+        if as_part:
+            api.run("aggregate.assign_object", f, products=[el], relating_object=node)
+        else:
+            api.run("spatial.assign_container", f, products=[el], relating_structure=node)
+        if not georef:
+            m = np.eye(4)
+            m[:3, 3] = offset
+            api.run("geometry.edit_object_placement", f, product=el, matrix=m)
+        V = np.asarray(it["vertices"]) - offset
+        T = np.asarray(it["triangles"])
+        if version == "IFC2X3":
+            pts = [f.createIfcCartesianPoint(v) for v in V.tolist()]
+            faces = [f.createIfcFace([f.createIfcFaceOuterBound(
+                        f.createIfcPolyLoop([pts[a], pts[b], pts[c]]), True)]) for a, b, c in T.tolist()]
+            if it.get("closed"):
+                item = f.createIfcFacetedBrep(f.createIfcClosedShell(faces))
+                rep_type = "Brep"
+            else:
+                item = f.createIfcFaceBasedSurfaceModel([f.createIfcConnectedFaceSet(faces)])
+                rep_type = "SurfaceModel"
+        else:
+            coords = f.createIfcCartesianPointList3D(V.tolist())
+            item = f.createIfcTriangulatedFaceSet(coords, None, bool(it.get("closed", False)),
+                                                  (T + 1).tolist(), None)
+            rep_type = "Tessellation"
+        rep = f.createIfcShapeRepresentation(body, "Body", rep_type, [item])
+        api.run("geometry.assign_representation", f, product=el, representation=rep)
+
+        if opt["psets"] and cls in _PSET_COMMON:
+            ps = api.run("pset.add_pset", f, product=el, name=_PSET_COMMON[cls])
+            api.run("pset.edit_pset", f, pset=ps, properties={"IsExternal": True, "Reference": it["name"],
+                                                              **({"LoadBearing": True} if cls != "IfcRailing" else {})})
+        if opt["qto"] and version != "IFC2X3" and cls in _QTO and it.get("volume"):
+            q = api.run("pset.add_qto", f, product=el, name=_QTO[cls])
+            api.run("pset.edit_qto", f, qto=q, properties={"GrossVolume": float(it["volume"])})
+        if opt["custom"]:
+            props = {"Vertices": int(len(V)), "Triangulos": int(len(T))}
+            if it.get("volume"):
+                props["Volumen_m3"] = float(it["volume"])
+            if it.get("assumptions"):
+                props["Supuestos"] = str(it["assumptions"])
+            pset = api.run("pset.add_pset", f, product=el, name="Pset_Open3D")
+            api.run("pset.edit_pset", f, pset=pset, properties=props)
+
+    f.write(path)
+    return path

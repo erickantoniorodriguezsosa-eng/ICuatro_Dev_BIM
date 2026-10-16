@@ -1,0 +1,522 @@
+"""
+main_gui.py
+GUI PySide6 + visor PyVista (pyvistaqt). Se eligió PyVista sobre la ventana de
+Open3D porque QtInteractor se incrusta como widget Qt nativo; el visor de Open3D
+no se puede incrustar de forma estable en PySide6. Open3D se usa solo para cálculo.
+"""
+import os
+import sys
+import traceback
+
+import numpy as np
+import pyvista as pv
+from pyvistaqt import QtInteractor
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+                               QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+                               QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+                               QPushButton, QSpinBox, QVBoxLayout, QWidget)
+
+from bridge import Bridge
+from core_processing import ASPRS_GROUND, PointCloudProcessor
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SHOT_PATH = os.path.join(HERE, ".bridge_shot.png")
+
+
+def _jsonable(o):
+    """Convierte numpy a tipos JSON para responder por el puente."""
+    if isinstance(o, dict):
+        return {str(k): _jsonable(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_jsonable(v) for v in o]
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    if isinstance(o, np.generic):
+        return o.item()
+    return o
+
+COLOR_GROUND = (0.55, 0.40, 0.20)
+COLOR_NON_GROUND = (0.20, 0.65, 0.25)
+# Paleta por código ASPRS (clasificación automática): 2 suelo, 6 estructura, 5 vegetación
+CLASS_COLORS = {1: (0.55, 0.55, 0.55), 2: COLOR_GROUND, 5: COLOR_NON_GROUND, 6: (0.90, 0.30, 0.20)}
+
+
+class _Signals(QObject):
+    done = Signal(object, object)   # (worker, resultado)
+    error = Signal(object, str)     # (worker, traceback)
+
+
+class Worker(QRunnable):
+    """Ejecuta una función pesada fuera del hilo de UI (la UI no se congela)."""
+    def __init__(self, fn, *args, **kw):
+        super().__init__()
+        self.fn, self.args, self.kw = fn, args, kw
+        self.on_done = None
+        self.signals = _Signals()
+
+    def run(self):
+        try:
+            self.signals.done.emit(self, self.fn(*self.args, **self.kw))
+        except Exception:
+            self.signals.error.emit(self, traceback.format_exc())
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("LAS Terrain - v0.1")
+        self.resize(1400, 850)
+        self.proc = PointCloudProcessor()
+        self.pool = QThreadPool.globalInstance()
+        self._sample = None
+        self._workers = set()  # evita que Python libere el Worker (y sus señales) en vuelo
+        self._path = None
+        self._pending = None   # petición del puente a la espera de que termine una tarea
+        self._only = None      # códigos de clase visibles en la nube (None = todos)
+        self._classified_view = False
+        self._mode = "class"
+        self._build_ui()
+        self._set_enabled(classify=False, surface=False, smooth=False)
+        self.bridge = Bridge()
+        self.bridge.request.connect(self._on_bridge_request)  # hilo HTTP -> hilo UI (en cola)
+        self._say(f"Puente de control en 127.0.0.1:{self.bridge.port}")
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
+        self.side = QWidget()
+        self.side.setFixedWidth(310)
+        lay = QVBoxLayout(self.side)
+
+        self.btn_load = QPushButton("Cargar archivo .LAS")
+        self.btn_load.clicked.connect(self.on_load)
+        lay.addWidget(self.btn_load)
+
+        g1 = QGroupBox("Clasificación de terreno")
+        f1 = QFormLayout(g1)
+        self.cb_cls = QComboBox()
+        self.cb_cls.addItems(["Celdas (altura mínima)", "RANSAC (plano único)"])
+        # EXTENSIÓN: añade "CSF" aquí y en core_processing.classify_ground
+        self.sp_cell = self._spin(2.0, 0.1, 100, 0.5)
+        self.sp_tol = self._spin(0.5, 0.01, 20, 0.1)
+        f1.addRow("Método", self.cb_cls)
+        f1.addRow("Celda (m)", self.sp_cell)
+        f1.addRow("Tol. altura / dist. (m)", self.sp_tol)
+        self.btn_cls = QPushButton("Clasificar Terreno (Básico)")
+        self.btn_cls.clicked.connect(self.on_classify)
+        f1.addRow(self.btn_cls)
+        lay.addWidget(g1)
+
+        g0 = QGroupBox("Clasificación automática (forma)")
+        f0 = QFormLayout(g0)
+        self.btn_auto = QPushButton("Clasificar: terreno / estructura / vegetación")
+        self.btn_auto.setToolTip("Modelo entrenado con rasgos geométricos locales (models/autoclass.joblib)")
+        self.btn_auto.clicked.connect(self.on_auto)
+        f0.addRow(self.btn_auto)
+        lay.addWidget(g0)
+
+        g1b = QGroupBox("Reconstrucción")
+        f1b = QFormLayout(g1b)
+        self.btn_struct = QPushButton("Agrupar estructura y estimar eje")
+        self.btn_struct.clicked.connect(self.on_structure)
+        f1b.addRow(self.btn_struct)
+        lay.addWidget(g1b)
+
+        g2 = QGroupBox("Superficie")
+        f2 = QFormLayout(g2)
+        self.cb_surf = QComboBox()
+        self.cb_surf.addItems(["Delaunay 2.5D (TIN)", "Poisson"])
+        self.sp_vox = self._spin(0.0, 0.0, 50, 0.1)
+        self.sp_edge = self._spin(0.0, 0.0, 1000, 1.0)
+        f2.addRow("Método", self.cb_surf)
+        f2.addRow("Diezmado voxel (m, 0=off)", self.sp_vox)
+        f2.addRow("Arista máx. (m, 0=off)", self.sp_edge)
+        self.btn_surf = QPushButton("Generar Superficie (Triangulación)")
+        self.btn_surf.clicked.connect(self.on_surface)
+        f2.addRow(self.btn_surf)
+        lay.addWidget(g2)
+
+        g3 = QGroupBox("Suavizado de malla")
+        f3 = QFormLayout(g3)
+        self.cb_smooth = QComboBox()
+        self.cb_smooth.addItems(["Taubin (sin encoger)", "Laplaciano", "Promedio simple"])
+        self.sp_iter = QSpinBox()
+        self.sp_iter.setRange(1, 200)
+        self.sp_iter.setValue(10)
+        self.chk_keepxy = QCheckBox("Conservar X,Y (solo suaviza Z)")
+        self.chk_keepxy.setChecked(True)
+        f3.addRow("Filtro", self.cb_smooth)
+        f3.addRow("Iteraciones", self.sp_iter)
+        f3.addRow(self.chk_keepxy)
+        self.btn_smooth = QPushButton("Suavizar malla")
+        self.btn_smooth.clicked.connect(self.on_smooth)
+        f3.addRow(self.btn_smooth)
+        lay.addWidget(g3)
+
+        self.chk_cloud = QCheckBox("Mostrar nube")
+        self.chk_cloud.setChecked(True)
+        self.chk_cloud.toggled.connect(lambda v: self._toggle("cloud", v))
+        self.chk_mesh = QCheckBox("Mostrar malla")
+        self.chk_mesh.setChecked(True)
+        self.chk_mesh.toggled.connect(lambda v: self._toggle("mesh", v))
+        row = QHBoxLayout()
+        row.addWidget(self.chk_cloud)
+        row.addWidget(self.chk_mesh)
+        lay.addLayout(row)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        lay.addWidget(self.progress)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        lay.addWidget(self.log, 1)
+
+        self.plotter = QtInteractor(self)
+        self.plotter.set_background("#1e1e24")
+        self.plotter.add_axes()
+
+        central = QWidget()
+        h = QHBoxLayout(central)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(self.side)
+        h.addWidget(self.plotter.interactor, 1)
+        self.setCentralWidget(central)
+
+    @staticmethod
+    def _spin(val, lo, hi, step):
+        s = QDoubleSpinBox()
+        s.setRange(lo, hi)
+        s.setSingleStep(step)
+        s.setDecimals(2)
+        s.setValue(val)
+        return s
+
+    def _set_enabled(self, classify=None, surface=None, smooth=None):
+        if classify is not None:
+            self.btn_cls.setEnabled(classify)
+        if surface is not None:
+            self.btn_surf.setEnabled(surface)
+        if smooth is not None:
+            self.btn_smooth.setEnabled(smooth)
+
+    def _toggle(self, name, visible):
+        actor = self.plotter.renderer.actors.get(name)
+        if actor is not None:
+            actor.SetVisibility(visible)
+            self.plotter.render()
+
+    def _say(self, msg):
+        self.log.appendPlainText(msg)
+
+    # ------------------------------------------------------- tareas en hilo
+    def _run(self, fn, on_done, *args, **kw):
+        self.side.setEnabled(False)       # el visor sigue interactivo durante el cálculo
+        self.progress.setRange(0, 0)      # barra indeterminada
+        w = Worker(fn, *args, **kw)
+        w.on_done = on_done
+        self._workers.add(w)
+        # Slots del MainWindow (hilo UI) -> conexión en cola. NO usar lambdas:
+        # correrían en el hilo del Worker y VTK/Qt se cerraría al dibujar.
+        w.signals.done.connect(self._on_worker_done)
+        w.signals.error.connect(self._on_worker_error)
+        self.pool.start(w)
+
+    def _end_task(self, w):
+        self._workers.discard(w)
+        self.side.setEnabled(True)
+        self.progress.setRange(0, 1)
+
+    @Slot(object, object)
+    def _on_worker_done(self, w, result):
+        self._end_task(w)
+        try:
+            w.on_done(result)
+        except Exception:
+            tb = traceback.format_exc()
+            self._say(tb)
+            self._bridge_complete(False, error=tb.strip().splitlines()[-1])
+            return
+        self._bridge_complete(True, result=_jsonable(result))
+
+    @Slot(object, str)
+    def _on_worker_error(self, w, tb):
+        self._end_task(w)
+        self._say(tb)
+        if self._pending is not None:  # comando remoto: sin diálogo modal que bloquee la UI
+            self._bridge_complete(False, error=tb.strip().splitlines()[-1])
+            return
+        QMessageBox.critical(self, "Error", tb.strip().splitlines()[-1])
+
+    # --------------------------------------------------------------- acciones
+    def on_load(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Abrir nube", "", "LAS/LAZ (*.las *.laz)")
+        if not path:
+            return
+        self._load_path(path)
+
+    def _load_path(self, path):
+        self._say(f"Cargando {path} ...")
+        self._path = path
+        self._run(self.proc.load_las, self._loaded, path)
+
+    def _loaded(self, info):
+        self._say(f"{info['n_points']:,} puntos | Z {info['z_range'][0]:.2f}..{info['z_range'][1]:.2f}"
+                  f" | origen {np.round(info['origin'], 2)}")
+        self._sample = self.proc.display_sample()
+        self.plotter.remove_actor("mesh")
+        self._draw_cloud(classified=False)
+        self.plotter.reset_camera()
+        self._set_enabled(classify=True, surface=False, smooth=False)
+
+    def on_classify(self):
+        if self.cb_cls.currentIndex() == 0:
+            kw = dict(method="grid", cell_size=self.sp_cell.value(),
+                      height_tol=self.sp_tol.value())
+        else:
+            kw = dict(method="ransac", distance=self.sp_tol.value())
+        self._say("Clasificando ...")
+        self._run(self.proc.classify_ground, self._classified, **kw)
+
+    def on_auto(self):
+        self._say("Clasificación automática (vóxeles + rasgos + modelo) ...")
+        self._run(self.proc.classify_auto, self._auto_done)
+
+    def _auto_done(self, st):
+        self._say(f"Terreno {st['ground']:,} | Estructura {st['structure']:,} | "
+                  f"Vegetación {st['vegetation']:,} (vóxel {st['voxel']} m)")
+        self._classified(st, quiet=True)
+
+    def on_structure(self):
+        self._say("Agrupando estructura (conectividad de vóxeles) ...")
+        self._run(self.proc.analyze_structure, self._structure_done)
+
+    def _structure_done(self, st):
+        for c in st["clusters"]:
+            self._say(f"  grupo {c['id']}: {c['points']:,} pts, caja "
+                      f"{c['bbox_xyz'][0]:.1f} x {c['bbox_xyz'][1]:.1f} x {c['bbox_xyz'][2]:.1f} m")
+        ax = st["axis"]
+        if ax:
+            self._say(f"Eje: azimut {ax['angle_deg']:.2f} grados, largo {ax['length']:.1f} m, "
+                      f"ancho {ax['width']:.1f} m")
+        self._draw_clusters()
+
+    def _draw_clusters(self):
+        r = self.proc.structure
+        self._mode = "clusters"
+        self.plotter.remove_actor("mesh")
+        m = r.labels >= 0
+        poly = pv.PolyData(self.proc.points[m])
+        pal = np.array([(0.90, 0.30, 0.20), (0.20, 0.55, 0.90), (0.95, 0.75, 0.10),
+                        (0.60, 0.30, 0.80), (0.20, 0.75, 0.55), (0.95, 0.50, 0.70)])
+        poly["rgb"] = (pal[r.labels[m] % len(pal)] * 255).astype(np.uint8)
+        self.plotter.add_mesh(poly, scalars="rgb", rgb=True, style="points", point_size=2, name="cloud")
+        if r.axis_dir is not None:
+            half = r.length / 2 + 5
+            a = r.axis_center - r.axis_dir * half
+            b = r.axis_center + r.axis_dir * half
+            self.plotter.add_mesh(pv.Line(a, b), color="yellow", line_width=4, name="axis")
+        self._toggle("cloud", self.chk_cloud.isChecked())
+        self.plotter.render()
+
+    def _classified(self, stats, quiet=False):
+        if not quiet:
+            self._say(f"Terreno: {stats['ground']:,} | No terreno: {stats['non_ground']:,}")
+        self.plotter.remove_actor("mesh")
+        self._draw_cloud(classified=True)
+        self._set_enabled(surface=stats["ground"] >= 3, smooth=False)
+
+    def on_surface(self):
+        method = "delaunay" if self.cb_surf.currentIndex() == 0 else "poisson"
+        self._say(f"Generando superficie ({method}) ...")
+        self._run(self.proc.generate_surface, self._surfaced, method=method,
+                  voxel_size=self.sp_vox.value(), max_edge=self.sp_edge.value())
+
+    def _surfaced(self, stats):
+        self._say(f"Malla: {stats['vertices']:,} vértices, {stats['triangles']:,} triángulos")
+        self._draw_mesh()
+        self._set_enabled(smooth=True)
+
+    def on_smooth(self):
+        method = ["taubin", "laplacian", "simple"][self.cb_smooth.currentIndex()]
+        self._say(f"Suavizando ({method} x{self.sp_iter.value()}) ...")
+        self._run(self.proc.smooth_mesh, self._smoothed, method=method,
+                  iterations=self.sp_iter.value(), preserve_xy=self.chk_keepxy.isChecked())
+
+    def _smoothed(self, st):
+        self._say(f"Suavizado: cambio Z RMS {st['rms_dz']:.4f} m, máx {st['max_dz']:.4f} m")
+        self._draw_mesh()
+
+    def _draw_mesh(self):
+        m = self.proc.mesh
+        faces = np.hstack([np.full((len(m.triangles), 1), 3), m.triangles]).ravel()
+        poly = pv.PolyData(m.vertices, faces)
+        poly["Elevación"] = m.vertices[:, 2] + self.proc.origin[2]
+        self.plotter.add_mesh(poly, scalars="Elevación", cmap="terrain", show_edges=True,
+                              edge_color="#222222", line_width=0.3, name="mesh")
+        self._toggle("mesh", self.chk_mesh.isChecked())
+        self.plotter.render()
+
+    # ---------------------------------------------------------------- render
+    def _draw_cloud(self, classified: bool):
+        self._classified_view = classified
+        idx = self._sample
+        if classified and self._only:
+            idx = idx[np.isin(self.proc.classification[idx], list(self._only))]
+            if len(idx) == 0:
+                return
+        pts = self.proc.points[idx]
+        poly = pv.PolyData(pts)
+        if classified:
+            cl = self.proc.classification[idx]
+            rgb = np.tile(np.array(COLOR_NON_GROUND), (len(idx), 1))
+            for code, col in CLASS_COLORS.items():
+                rgb[cl == code] = col
+            poly["rgb"] = (rgb * 255).astype(np.uint8)
+            self.plotter.add_mesh(poly, scalars="rgb", rgb=True, style="points",
+                                  point_size=2, name="cloud")
+        else:
+            poly["Elevación"] = pts[:, 2] + self.proc.origin[2]
+            self.plotter.add_mesh(poly, scalars="Elevación", cmap="viridis", style="points",
+                                  point_size=2, name="cloud")
+        self._toggle("cloud", self.chk_cloud.isChecked())
+        self.plotter.render()
+
+    # ----------------------------------------------------------------- puente
+    def _bridge_complete(self, ok, **data):
+        req, self._pending = self._pending, None
+        if req is not None:
+            req.finish(ok, **data)
+
+    @Slot(object)
+    def _on_bridge_request(self, req):
+        """Corre en el hilo de UI. Comandos 'sync' responden ya; los de tarea, al terminar."""
+        try:
+            sync = {"status": self._cmd_status, "log": self._cmd_log, "view": self._cmd_view,
+                    "screenshot": self._cmd_screenshot}
+            task = {"load": self._cmd_load, "classify": self._cmd_classify,
+                    "surface": self._cmd_surface, "smooth": self._cmd_smooth,
+                    "analyze": self._cmd_analyze, "autoclass": self._cmd_autoclass,
+                    "structure": self._cmd_structure}
+            if req.cmd in sync:
+                req.finish(True, result=_jsonable(sync[req.cmd](req.args)))
+            elif req.cmd in task:
+                if self._pending is not None or not self.side.isEnabled():
+                    return req.finish(False, error="la app está ocupada con otra tarea")
+                self._pending = req
+                task[req.cmd](req.args)
+            else:
+                req.finish(False, error=f"comando desconocido: {req.cmd}",
+                           commands=sorted([*sync, *task]))
+        except Exception as e:
+            if self._pending is req:
+                self._pending = None
+            self._say(traceback.format_exc())
+            req.finish(False, error=f"{type(e).__name__}: {e}")
+
+    def _cmd_status(self, a):
+        p = self.proc
+        return {
+            "busy": self._pending is not None or not self.side.isEnabled(),
+            "file": self._path,
+            "n_points": None if p.points is None else int(len(p.points)),
+            "origin": None if p.points is None else p.origin,
+            "classes": None if p.classification is None else
+                dict(zip(*[x.tolist() for x in np.unique(p.classification, return_counts=True)])),
+            "mesh": None if p.mesh is None else {"vertices": len(p.mesh.vertices),
+                                                  "triangles": len(p.mesh.triangles)},
+            "ui": {"classify_method": self.cb_cls.currentText(), "cell": self.sp_cell.value(),
+                   "tol": self.sp_tol.value(), "surface_method": self.cb_surf.currentText(),
+                   "voxel": self.sp_vox.value(), "max_edge": self.sp_edge.value(),
+                   "smooth": self.cb_smooth.currentText(), "smooth_iter": self.sp_iter.value(),
+                   "keep_xy": self.chk_keepxy.isChecked()},
+            "log_tail": self.log.toPlainText().splitlines()[-8:],
+        }
+
+    def _cmd_log(self, a):
+        return self.log.toPlainText().splitlines()[-int(a.get("n", 30)):]
+
+    def _cmd_view(self, a):
+        """view: iso|top|front|side|reset; cloud/mesh: bool para mostrar u ocultar."""
+        if "cloud" in a:
+            self.chk_cloud.setChecked(bool(a["cloud"]))
+        if "mesh" in a:
+            self.chk_mesh.setChecked(bool(a["mesh"]))
+        if "only" in a:  # lista de códigos ASPRS (2, 6, 5) o null para todos
+            self._only = set(a["only"]) if a["only"] else None
+            if self._classified_view:
+                self._draw_cloud(classified=True)
+        v = a.get("view")
+        if v:
+            {"iso": self.plotter.view_isometric, "top": self.plotter.view_xy,
+             "front": self.plotter.view_xz, "side": self.plotter.view_yz,
+             "reset": self.plotter.reset_camera}[v]()
+        self.plotter.render()
+        return "ok"
+
+    def _cmd_screenshot(self, a):
+        self.plotter.render()
+        self.plotter.screenshot(SHOT_PATH)
+        return {"path": SHOT_PATH}
+
+    def _cmd_load(self, a):
+        path = os.path.expanduser(str(a.get("path", "")))
+        if not os.path.isfile(path) or os.path.splitext(path)[1].lower() not in (".las", ".laz"):
+            raise ValueError(f"archivo .las/.laz no encontrado: {path}")
+        self._load_path(path)
+
+    def _cmd_classify(self, a):
+        if self.proc.points is None:
+            raise ValueError("carga un archivo primero")
+        self.cb_cls.setCurrentIndex({"grid": 0, "ransac": 1}[a.get("method", "grid")])
+        if "cell_size" in a:
+            self.sp_cell.setValue(float(a["cell_size"]))
+        if "height_tol" in a:
+            self.sp_tol.setValue(float(a["height_tol"]))
+        self.on_classify()
+
+    def _cmd_surface(self, a):
+        if not self.btn_surf.isEnabled():
+            raise ValueError("clasifica terreno primero")
+        self.cb_surf.setCurrentIndex({"delaunay": 0, "poisson": 1}[a.get("method", "delaunay")])
+        if "voxel_size" in a:
+            self.sp_vox.setValue(float(a["voxel_size"]))
+        if "max_edge" in a:
+            self.sp_edge.setValue(float(a["max_edge"]))
+        self.on_surface()
+
+    def _cmd_smooth(self, a):
+        if not self.btn_smooth.isEnabled():
+            raise ValueError("genera la superficie primero")
+        self.cb_smooth.setCurrentIndex({"taubin": 0, "laplacian": 1, "simple": 2}[a.get("method", "taubin")])
+        if "iterations" in a:
+            self.sp_iter.setValue(int(a["iterations"]))
+        if "preserve_xy" in a:
+            self.chk_keepxy.setChecked(bool(a["preserve_xy"]))
+        self.on_smooth()
+
+    def _cmd_structure(self, a):
+        if self.proc.points is None:
+            raise ValueError("carga un archivo primero")
+        self.on_structure()
+
+    def _cmd_autoclass(self, a):
+        if self.proc.points is None:
+            raise ValueError("carga un archivo primero")
+        self.on_auto()
+
+    def _cmd_analyze(self, a):
+        if self.proc.points is None:
+            raise ValueError("carga un archivo primero")
+        self._run(self.proc.analyze, lambda r: self._say("Análisis completado"))
+
+    def closeEvent(self, e):
+        self.bridge.stop()
+        self.plotter.close()
+        super().closeEvent(e)
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())

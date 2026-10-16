@@ -1,0 +1,57 @@
+{
+  "version": "0.1-borrador",
+  "nota": "Reglas EDITABLES. Las holguras y citas son valores de ejemplo (verificado=false) y deben validarse contra el Manual de Carreteras MOP vigente antes de uso contractual.",
+  "ndi_umbrales": { "4": 95, "3": 85, "2": 70 },
+  "ndi_nota": "Criterio interno sobre el índice de completitud (Psets, geometría, nombre, no-proxy). No es una norma.",
+  "defecto": {
+    "choque": "Crítica",
+    "holgura_m": 0.0,
+    "norma": "Sin criterio específico: interferencia geométrica entre disciplinas",
+    "descripcion": "",
+    "verificado": false
+  },
+  "pares": {
+    "SEG|SER": {
+      "choque": "Crítica",
+      "holgura_m": 0.5,
+      "descripcion": "Defensa/barrera vs. luminaria o ducto: no debe haber contacto ni invadir la zona libre de la defensa.",
+      "norma": "MC Vol. 6 Seguridad Vial (por verificar)",
+      "verificado": false
+    },
+    "SEG|SEG": {
+      "choque": "Crítica",
+      "holgura_m": 0.5,
+      "descripcion": "Elementos de seguridad vial/equipamiento (barreras, paraderos) en conflicto o sin separación mínima.",
+      "norma": "MC Vol. 6 Seguridad Vial (por verificar)",
+      "verificado": false
+    },
+    "DRE|SER": {
+      "choque": "Crítica",
+      "holgura_m": 0.5,
+      "descripcion": "Obra de drenaje intercepta servicio afectado.",
+      "norma": "MC Vol. 3 / Vol. 5 (por verificar)",
+      "verificado": false
+    },
+    "DRE|PAV": {
+      "choque": "Mayor",
+      "holgura_m": 0.0,
+      "descripcion": "Drenaje interfiere con estructura de pavimento (control de tapada).",
+      "norma": "MC Vol. 4 Obras Tipo (por verificar)",
+      "verificado": false
+    },
+    "EST|PAV": {
+      "choque": "Crítica",
+      "holgura_m": 0.0,
+      "descripcion": "Estructura interfiere con la rasante/pavimento (revisar gálibo).",
+      "norma": "MC Vol. 3 (por verificar)",
+      "verificado": false
+    },
+    "DRE|SEG": {
+      "choque": "Mayor",
+      "holgura_m": 0.3,
+      "descripcion": "Fundación o poste de seguridad vial interfiere con obra de drenaje.",
+      "norma": "MC Vol. 6 (por verificar)",
+      "verificado": false
+    }
+  }
+}

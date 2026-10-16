@@ -1,0 +1,23 @@
+﻿OK
+elementos	24
+facesets	21
+superficies	21
+vertices	1152
+triangulos	2160
+segundos	0.0053
+bbox_m	-2.0000	-0.3500	-0.3000	2.7800	0.3500	12.1507
+sup	Base_Hormigon	IFCFOOTING	$	12
+sup	Placa_Base	IFCDISCRETEACCESSORY	$	12
+sup	Fuste_Troncoconico	IFCCOLUMN	$	92
+sup	Tapa_Superior	IFCDISCRETEACCESSORY	$	92
+sup	Registro_Inspeccion	IFCDISCRETEACCESSORY	$	12
+sup	Brazo_A	IFCMEMBER	$	768
+sup	Brazo_B	IFCMEMBER	$	768
+sup	Acople_A	IFCDISCRETEACCESSORY	$	60
+sup	Acople_B	IFCDISCRETEACCESSORY	$	60
+sup	Luminaria_A	IFCLIGHTFIXTURE	$	12
+sup	Luminaria_B	IFCLIGHTFIXTURE	$	12
+sup	Lente_LED_A	IFCDISCRETEACCESSORY	$	2
+sup	Lente_LED_B	IFCDISCRETEACCESSORY	$	2
+sup	Perno_Anclaje_1	IFCMECHANICALFASTENER	$	44
+sup	Tuerca_1	IFCMECHANICALFASTENER	$	20

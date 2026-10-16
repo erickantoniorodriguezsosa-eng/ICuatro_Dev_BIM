@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>ICuatro.LandXmlBatch</AssemblyName>
+    <RootNamespace>ICuatro.LandXmlBatch</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Civil3DDir Condition="'$(Civil3DDir)' == ''">C:\Program Files\Autodesk\AutoCAD 2025</Civil3DDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="accoremgd"><HintPath>$(Civil3DDir)\accoremgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="acdbmgd"><HintPath>$(Civil3DDir)\acdbmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="acmgd"><HintPath>$(Civil3DDir)\acmgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="AeccDbMgd"><HintPath>$(Civil3DDir)\C3D\AeccDbMgd.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="AecBaseMgd"><HintPath>$(Civil3DDir)\ACA\AecBaseMgd.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+</Project>

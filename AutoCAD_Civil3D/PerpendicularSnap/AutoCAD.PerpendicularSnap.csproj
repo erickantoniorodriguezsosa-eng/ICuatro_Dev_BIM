@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- AutoCAD/Civil 3D 2025+ cargan ensamblados .NET 8; para 2022-2024 cambiar a net48. -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>ICuatro.CadTools</RootNamespace>
+    <AssemblyName>ICuatro.PerpendicularSnap</AssemblyName>
+    <LangVersion>7.3</LangVersion>
+    <!-- Ajustar si Civil 3D / AutoCAD esta instalado en otra ruta o version. -->
+    <AutoCadInstallDir Condition="'$(AutoCadInstallDir)' == ''">C:\Program Files\Autodesk\AutoCAD 2025</AutoCadInstallDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="AcMgd">
+      <HintPath>$(AutoCadInstallDir)\acmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AcDbMgd">
+      <HintPath>$(AutoCadInstallDir)\acdbmgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="AcCoreMgd">
+      <HintPath>$(AutoCadInstallDir)\accoremgd.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

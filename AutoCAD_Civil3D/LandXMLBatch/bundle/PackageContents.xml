@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0" AutodeskProduct="AutoCAD" ProductType="Application"
+                    Name="ICuatro LandXML por lotes" Description="Importa LandXML por lotes y crea superficies desde lineas, curvas y puntos."
+                    AppVersion="1.0.0" Author="Ingenieria Cuatro S.A." ProductCode="{6C1E5B2A-4F3D-4C8B-9A7E-1D2F3B4C5A61}"
+                    UpgradeCode="{0B7D9E3C-2A1F-4E6D-8C5B-7A9F1E2D3C41}">
+  <CompanyDetails Name="Ingenieria Cuatro S.A." />
+  <Components Description="Civil 3D 2025">
+    <RuntimeRequirements OS="Win64" Platform="Civil3D" SeriesMin="R25.0" SeriesMax="R25.0" />
+    <ComponentEntry AppName="ICuatroLandXmlBatch" ModuleName="./Contents/ICuatro.LandXmlBatch.dll"
+                    AppDescription="Importacion LandXML por lotes" LoadOnAutoCADStartup="True">
+      <Commands GroupName="ICuatro">
+        <Command Global="ICLANDXML" Local="ICLANDXML" />
+        <Command Global="-ICLANDXML" Local="-ICLANDXML" />
+        <Command Global="ICSUPLINEAS" Local="ICSUPLINEAS" />
+        <Command Global="ICMOVERZ" Local="ICMOVERZ" />
+        <Command Global="-ICMOVERZ" Local="-ICMOVERZ" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>

@@ -1,0 +1,108 @@
+# --- Entornos y caches ---
+.venv/
+venv/
+env/
+**/site-packages/
+**/node_modules/
+__pycache__/
+*.pyc
+*.pyd
+*.pyi
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+
+# --- Nubes de puntos y datos pesados ---
+*.las
+*.laz
+*.e57
+*.ply
+*.pcd
+*.npz
+*.npy
+*.pkl
+*.zip
+*.7z
+*.rar
+
+# --- Modelos BIM / 3D ---
+*.rvt
+*.rfa
+*.rte
+*.nwc
+*.nwd
+*.nwf
+*.ifc
+*.fbx
+*.obj
+*.glb
+*.gltf
+*.dwg
+*.dxf
+*.blend
+*.blend1
+*.blend2
+*.fbm/
+
+# --- Medios ---
+*.mp4
+*.mov
+*.avi
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.exr
+*.hdr
+*.ktx
+
+# --- Binarios compilados ---
+*.dll
+*.exe
+*.so
+*.dylib
+*.pak
+*.map
+!Revit/pyRevit/ICuatro.extension/bin/**
+
+# --- Carpetas de activos pesados ---
+Texturas_PBR/
+Rock030_8K-PNG/
+Renders/
+prueba_topografia.fbm/
+Standalone/
+
+# --- Temporales Windows / Office / OneDrive ---
+~$*
+*.tmp
+*.bak
+desktop.ini
+Thumbs.db
+
+# --- Estado de agentes (local, no versionado) ---
+.omc/
+!.omc/skills/
+.opencode/cache/
+.ai-team/runs/
+opencode-runs/
+
+# --- Repos independientes (historial propio) ---
+Civil3D/
+LAS_Terrain_App_v0.2/
+
+# --- Artefactos de compilacion .NET ---
+obj/
+bin/Debug/
+bin/Release/
+*.pdb
+*.cache
+*.baml
+*.resources
+*.suo
+*.user
+
+# --- Respaldos de corridas ai-team ---
+.ai-team/backups/
+.ai-team/removed/

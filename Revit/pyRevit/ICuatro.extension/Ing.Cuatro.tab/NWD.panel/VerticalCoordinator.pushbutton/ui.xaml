@@ -1,0 +1,248 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="NWD Coordinator — coordinación vertical"
+        Height="760" Width="1200"
+        MinHeight="600" MinWidth="980"
+        WindowStartupLocation="CenterScreen"
+        FontFamily="Segoe UI" FontSize="12"
+        Background="#F4F5F7">
+
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="Margin" Value="3"/>
+            <Setter Property="Background" Value="#EAECEF"/>
+            <Setter Property="BorderBrush" Value="#C0C6CF"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Foreground" Value="#1E293B"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+        <Style x:Key="Primario" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#005FB8"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#004C99"/>
+        </Style>
+        <Style x:Key="Peligro" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#B3261E"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#8C1D18"/>
+        </Style>
+        <Style TargetType="GroupBox">
+            <Setter Property="Margin" Value="0,0,0,8"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="BorderBrush" Value="#D0D5DD"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+        <Style TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style x:Key="Dato" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Margin" Value="0,1,0,1"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Name="contenido" Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="#E8EDF5" CornerRadius="3"
+                Padding="10" Margin="0,0,0,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                    <TextBlock Text="Modelo:" Margin="0,0,6,0"/>
+                    <ComboBox Name="cmb_modelos" Width="320"
+                              SelectionChanged="on_modelo_cambiado"/>
+                </StackPanel>
+
+                <TextBlock Grid.Column="1" Name="txt_cabecera"
+                           Style="{StaticResource Dato}"
+                           Margin="14,0,0,0" Text="Preparando…"/>
+
+                <Button Grid.Column="2" Name="btn_recargar"
+                        Content="Volver a detectar" Click="on_recargar"/>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="300"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto"
+                          Margin="0,0,8,0">
+                <StackPanel>
+                    <GroupBox Header="Superficie">
+                        <StackPanel>
+                            <TextBlock Name="txt_superficies" Style="{StaticResource Dato}"
+                                       Text="—"/>
+                            <ComboBox Name="cmb_superficie" Margin="0,6,0,4"
+                                      SelectionChanged="on_superficie_cambiada"/>
+                            <TextBlock Name="txt_zona" Style="{StaticResource Dato}"
+                                       Text="Zona: se calcula con la selección."/>
+                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                <TextBlock Text="Margen (m):"/>
+                                <TextBox Name="txt_margen" Text="25" Width="55" Margin="6,0,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <GroupBox Header="Elementos de Revit">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource Dato}" Margin="2,0,2,6"
+                                       Text="Puedes cambiar de vista y seleccionar en Revit sin cerrar esta ventana. Luego pulsa Usar la selección de Revit."/>
+                            <Button Name="btn_sel_revit" Content="Usar la selección de Revit"
+                                    Click="on_usar_seleccion"/>
+                            <Button Name="btn_sel_pick" Content="Escoger en pantalla…"
+                                    Click="on_escoger"/>
+                            <Button Name="btn_sel_familia"
+                                    Content="Todos los ejemplares de una familia..."
+                                    Click="on_por_familia"/>
+                            <TextBlock Text="Por ElementId:" Margin="2,6,0,2"
+                                       Style="{StaticResource Dato}"/>
+                            <TextBox Name="txt_ids" Height="46" AcceptsReturn="True"
+                                     VerticalScrollBarVisibility="Auto"/>
+                            <Button Name="btn_sel_ids" Content="Buscar por ID"
+                                    Click="on_buscar_ids"/>
+                            <TextBlock Name="txt_seleccion" Margin="2,6,0,0"
+                                       Style="{StaticResource Dato}"
+                                       Text="Ningún elemento seleccionado."/>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <GroupBox Header="Referencia y ajustes">
+                        <StackPanel>
+                            <TextBlock Text="Punto de referencia:" Style="{StaticResource Dato}"/>
+                            <ComboBox Name="cmb_referencia" Margin="0,2,0,6"/>
+
+                            <TextBlock Text="Si hay varias superficies:" Style="{StaticResource Dato}"/>
+                            <ComboBox Name="cmb_estrategia" Margin="0,2,0,6"/>
+                            <CheckBox Name="chk_pendiente" IsChecked="True"
+                                      Margin="0,2,0,8"
+                                      Content="Detectar pendiente / forma"
+                                      ToolTip="Solo detecta durante ANALIZAR. Pregunta antes de adaptar ejes rectos compatibles al APLICAR. No deforma familias puntuales ni perfiles irregulares."/>
+
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Margin="0,0,4,0">
+                                    <TextBlock Text="Offset (m)" Style="{StaticResource Dato}"/>
+                                    <TextBox Name="txt_offset" Text="0.000"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Margin="4,0,0,0">
+                                    <TextBlock Text="Tolerancia (m)" Style="{StaticResource Dato}"/>
+                                    <TextBox Name="txt_tolerancia" Text="0.020"/>
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+                    </GroupBox>
+
+                    <Button Name="btn_analizar" Content="ANALIZAR"
+                            Style="{StaticResource Primario}" Height="34"
+                            FontSize="13" Click="on_analizar"/>
+
+                    <GroupBox Header="Leyenda" Margin="0,8,0,0">
+                        <StackPanel Name="pnl_leyenda"/>
+                    </GroupBox>
+                </StackPanel>
+            </ScrollViewer>
+
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Background="#E8EDF5" CornerRadius="3"
+                        Padding="8" Margin="0,0,0,6">
+                    <TextBlock Name="txt_resumen" Style="{StaticResource Dato}"
+                               Text="Selecciona elementos y pulsa ANALIZAR. El análisis no modifica el modelo."/>
+                </Border>
+
+                <ListView Grid.Row="1" Name="lv_resultados" BorderBrush="#D0D5DD"
+                          SelectionChanged="on_fila_seleccionada">
+                    <ListView.View>
+                        <GridView>
+                            <GridViewColumn Header="Sel." Width="38">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <CheckBox IsChecked="{Binding Marcado}"
+                                                  Click="on_marcar_fila"
+                                                  HorizontalAlignment="Center"/>
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="ElementId" Width="80" DisplayMemberBinding="{Binding Id}"/>
+                            <GridViewColumn Header="Categoría" Width="115" DisplayMemberBinding="{Binding Categoria}"/>
+                            <GridViewColumn Header="Familia" Width="140" DisplayMemberBinding="{Binding Familia}"/>
+                            <GridViewColumn Header="Tipo" Width="130" DisplayMemberBinding="{Binding Tipo}"/>
+                            <GridViewColumn Header="Z elemento" Width="85" DisplayMemberBinding="{Binding ZElemento}"/>
+                            <GridViewColumn Header="Z NWD" Width="85" DisplayMemberBinding="{Binding ZSuperficie}"/>
+                            <GridViewColumn Header="DZ (m)" Width="80" DisplayMemberBinding="{Binding DZ}"/>
+                            <GridViewColumn Header="Estado" Width="105" DisplayMemberBinding="{Binding Estado}"/>
+                            <GridViewColumn Header="Observaciones" Width="270">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Observaciones}"
+                                                   ToolTip="{Binding Observaciones}"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                        </GridView>
+                    </ListView.View>
+                </ListView>
+            </Grid>
+        </Grid>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,6,0,0">
+            <Button Name="btn_marcar_todo" Content="Marcar todos" Click="on_marcar_todo"/>
+            <Button Name="btn_desmarcar" Content="Desmarcar" Click="on_desmarcar"/>
+            <Button Name="btn_marcar_movibles" Content="Solo los que se mueven"
+                    Click="on_marcar_movibles"/>
+            <Separator Width="12" Opacity="0"/>
+            <Button Name="btn_previsualizar" Content="PREVISUALIZAR" Click="on_previsualizar"
+                    ToolTip="Colorea la vista activa. Puedes navegar libremente; vuelve a pulsar para previsualizar en otra vista."/>
+            <Button Name="btn_limpiar" Content="Quitar colores" Click="on_limpiar"/>
+            <Separator Width="12" Opacity="0"/>
+            <Button Name="btn_aplicar" Content="APLICAR NIVELACIÓN"
+                    Style="{StaticResource Peligro}" Click="on_aplicar"/>
+            <Separator Width="12" Opacity="0"/>
+            <TextBlock Text="Ajuste manual (m):" Style="{StaticResource Dato}" Margin="4,0"/>
+            <TextBox Name="txt_manual" Text="0.000" Width="70"/>
+            <Button Name="btn_manual" Content="Aplicar a lo marcado" Click="on_ajuste_manual"/>
+        </StackPanel>
+
+        <Grid Grid.Row="3" Margin="0,8,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Background="#0A2540" Height="30"
+                    CornerRadius="2" Margin="0,0,8,0">
+                <TextBlock Name="txt_estado" Text="Listo." Foreground="White"
+                           Margin="10,0" FontWeight="SemiBold" FontSize="11"/>
+            </Border>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button Name="btn_registro" Content="Guardar registro" Click="on_guardar_registro"/>
+                <Button Name="btn_cerrar" Content="Cerrar" Width="90" Click="on_cerrar"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

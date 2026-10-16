@@ -1,0 +1,18 @@
+<ControlTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+    <Border Background="{Binding fondo}" CornerRadius="4"
+            Padding="10,7" Margin="3,2">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Background="{Binding color}" CornerRadius="3"/>
+            <StackPanel Grid.Column="1" Margin="10,0,0,0">
+                <TextBlock Text="{Binding nombre}" Foreground="#0F172A"
+                           FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock Text="{Binding estado}" Foreground="{Binding color}"
+                           FontSize="11" Margin="0,3,0,0"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</ControlTemplate>

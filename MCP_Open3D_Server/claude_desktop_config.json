@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "open3d-pointcloud": {
+      "command": "C:\\OD\\OneDrive - Ingeniería Cuatro S.A\\Documentos\\_00.PRUEBAS.DYNAMO\\ICuatro_Dev_BIM\\MCP_Open3D_Server\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\OD\\OneDrive - Ingeniería Cuatro S.A\\Documentos\\_00.PRUEBAS.DYNAMO\\ICuatro_Dev_BIM\\MCP_Open3D_Server\\open3d_server.py"
+      ]
+    }
+  }
+}
